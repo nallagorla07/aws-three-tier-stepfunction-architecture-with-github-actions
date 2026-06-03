@@ -1,0 +1,130 @@
+name: Three-Tier Deployment Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION:  us-east-1
+  S3_BUCKET:   three-tier-artifacts
+
+jobs:
+  # ── 1. Terraform: provision / update infrastructure ─────────────────────────
+  terraform:
+    name: Terraform Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init
+
+      - name: Terraform Validate
+        run: terraform -chdir=terraform validate
+
+      - name: Terraform Plan
+        run: terraform -chdir=terraform plan -out=tfplan
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
+      - name: Terraform Apply
+        run: terraform -chdir=terraform apply -auto-approve tfplan
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
+  # ── 2. Build and upload artifacts to S3 ─────────────────────────────────────
+  build-and-upload:
+    name: Build and Upload Artifacts
+    runs-on: ubuntu-latest
+    needs: terraform
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web-tier/package.json
+
+      - name: Install and build web tier
+        run: |
+          cd web-tier
+          npm ci
+          npm run build
+
+      - name: Package web tier
+        run: zip -r web-tier.zip web-tier/public web-tier/dist
+
+      - name: Package app tier
+        run: zip -r app-tier.zip app-tier/ --exclude "app-tier/logs/*" --exclude "app-tier/node_modules/*"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Upload app artifact to S3
+        run: aws s3 cp app-tier.zip s3://${{ env.S3_BUCKET }}/app-tier.zip
+
+      - name: Upload web artifact to S3
+        run: aws s3 cp web-tier.zip s3://${{ env.S3_BUCKET }}/web-tier.zip
+
+  # ── 3. Trigger Step Function deployment ─────────────────────────────────────
+  trigger-stepfunction:
+    name: Trigger Step Function
+    runs-on: ubuntu-latest
+    needs: build-and-upload
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Start Step Function execution
+        id: sfn
+        run: |
+          EXECUTION_ARN=$(aws stepfunctions start-execution \
+            --state-machine-arn "${{ secrets.STEPFUNCTION_ARN }}" \
+            --name "deploy-${{ github.sha }}" \
+            --query "executionArn" --output text)
+          echo "execution_arn=$EXECUTION_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for execution to complete
+        run: |
+          EXEC_ARN="${{ steps.sfn.outputs.execution_arn }}"
+          while true; do
+            STATUS=$(aws stepfunctions describe-execution \
+              --execution-arn "$EXEC_ARN" \
+              --query "status" --output text)
+            echo "Step Function status: $STATUS"
+            case "$STATUS" in
+              SUCCEEDED) echo "Deployment succeeded!" ; exit 0 ;;
+              FAILED|ABORTED|TIMED_OUT)
+                echo "Deployment failed with status: $STATUS"
+                exit 1 ;;
+              *) sleep 20 ;;
+            esac
+          done

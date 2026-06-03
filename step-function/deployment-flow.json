@@ -1,0 +1,116 @@
+{
+  "Comment": "Three-Tier Application Deployment Workflow",
+  "StartAt": "DeployAppTier",
+  "States": {
+    "DeployAppTier": {
+      "Type": "Task",
+      "Resource": "${deploy_lambda_arn}",
+      "Parameters": {
+        "tier": "app",
+        "action": "deploy"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeploymentFailed"
+        }
+      ],
+      "Next": "WaitForAppHealthy"
+    },
+    "WaitForAppHealthy": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckAppHealth"
+    },
+    "CheckAppHealth": {
+      "Type": "Task",
+      "Resource": "${deploy_lambda_arn}",
+      "Parameters": {
+        "tier": "app",
+        "action": "health_check"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 20,
+          "MaxAttempts": 5,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeploymentFailed"
+        }
+      ],
+      "Next": "DeployWebTier"
+    },
+    "DeployWebTier": {
+      "Type": "Task",
+      "Resource": "${deploy_lambda_arn}",
+      "Parameters": {
+        "tier": "web",
+        "action": "deploy"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeploymentFailed"
+        }
+      ],
+      "Next": "WaitForWebHealthy"
+    },
+    "WaitForWebHealthy": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckWebHealth"
+    },
+    "CheckWebHealth": {
+      "Type": "Task",
+      "Resource": "${deploy_lambda_arn}",
+      "Parameters": {
+        "tier": "web",
+        "action": "health_check"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 20,
+          "MaxAttempts": 5,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DeploymentFailed"
+        }
+      ],
+      "Next": "DeploymentSucceeded"
+    },
+    "DeploymentSucceeded": {
+      "Type": "Succeed"
+    },
+    "DeploymentFailed": {
+      "Type": "Fail",
+      "Error": "DeploymentError",
+      "Cause": "Deployment failed — check Lambda logs for details"
+    }
+  }
+}
