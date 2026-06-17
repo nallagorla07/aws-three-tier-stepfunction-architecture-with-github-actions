@@ -10,7 +10,7 @@ env:
   S3_BUCKET:   three-tier-artifacts
 
 jobs:
-  # ── 1. Terraform: provision / update infrastructure ─────────────────────────
+  #1. Terraform: provision / update infrastructure
   terraform:
     name: Terraform Infrastructure
     runs-on: ubuntu-latest
